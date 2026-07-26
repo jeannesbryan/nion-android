@@ -1,0 +1,76 @@
+# Gradle
+.gradle/
+**/.gradle/
+build/
+**/build/
+
+# Android build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local packaged APKs
+dist/
+
+# Android SDK path
+local.properties
+
+# Signing keys / secrets
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+signing.properties
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS / file manager
+.DS_Store
+Thumbs.db
+.directory
+
+# Java / Kotlin
+*.class
+*.log
+hs_err_pid*
+replay_pid*
+
+# Native build outputs
+.externalNativeBuild/
+.cxx/
+
+# Captures / profiler output
+captures/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+
+# Python helper/cache files
+__pycache__/
+*.py[cod]
+nion_stage234.py
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Generated reports
+reports/
+lint-results*.html
+lint-results*.xml
+
+# Do not ignore source Android resources or bundled assets.

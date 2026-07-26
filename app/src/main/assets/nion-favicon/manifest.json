@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "NiOn Favicon Bridge",
+  "version": "1.0.0",
+  "description": "Provides page favicons to NiOn.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "nion-favicon@local"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["favicon.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "nativeMessaging",
+    "nativeMessagingFromContent",
+    "geckoViewAddons",
+    "<all_urls>"
+  ]
+}
