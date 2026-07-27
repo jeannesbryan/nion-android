@@ -3,7 +3,7 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#FFFFFF"
+    android:background="@color/nion_background"
     android:orientation="vertical">
 
     <LinearLayout
@@ -16,22 +16,26 @@
             android:id="@+id/backButton"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:text="←" />
+            android:text="←" android:contentDescription="Back"
+            />
 
         <Button
             android:id="@+id/forwardButton"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:text="→" />
+            android:text="→" android:contentDescription="Forward"
+            />
 
         <Button
             android:id="@+id/reloadButton"
             android:layout_width="48dp"
             android:layout_height="48dp"
-            android:text="↻" />
+            android:text="↻" android:contentDescription="Reload page"
+            />
 
         <EditText
             android:id="@+id/addressBar"
+            android:contentDescription="Address or search"
             android:layout_width="0dp"
             android:layout_height="48dp"
             android:layout_weight="1"
@@ -41,14 +45,15 @@
             android:paddingStart="8dp"
             android:paddingEnd="8dp"
             android:singleLine="true"
-            android:textColor="#111111"
-            android:textColorHint="#777777" />
+            android:textColor="@color/nion_text_primary"
+            android:textColorHint="@color/nion_text_secondary" />
 
         <Button
             android:id="@+id/goButton"
             android:layout_width="wrap_content"
             android:layout_height="48dp"
-            android:text="Go" />
+            android:text="Go" android:contentDescription="Go to address"
+            />
 
     </LinearLayout>
 
@@ -76,6 +81,7 @@
             android:id="@+id/siteInfoButton"
             android:layout_width="40dp"
             android:layout_height="40dp"
+            android:visibility="gone"
             android:contentDescription="Site information"
             android:text="ⓘ" />
 
@@ -83,6 +89,7 @@
             android:id="@+id/clearSiteDataButton"
             android:layout_width="40dp"
             android:layout_height="40dp"
+            android:visibility="gone"
             android:contentDescription="Clear data for this site"
             android:text="⌫" />
 
@@ -97,13 +104,21 @@
             android:id="@+id/closeTabButton"
             android:layout_width="40dp"
             android:layout_height="40dp"
-            android:text="×" />
+            android:text="×" android:contentDescription="Close tab"
+            />
 
         <Button
             android:id="@+id/newTabButton"
             android:layout_width="40dp"
             android:layout_height="40dp"
-            android:text="+" />
+            android:text="+" android:contentDescription="New tab"
+            />
+        <Button
+            android:id="@+id/browserMenuButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="Browser menu"
+            android:text="⋮" />
 
     </LinearLayout>
 
@@ -116,8 +131,18 @@
         android:paddingEnd="10dp"
         android:paddingBottom="5dp"
         android:text="Tor: starting..."
-        android:textColor="#333333"
+        android:textColor="@color/nion_text_secondary"
         android:textSize="12sp" />
+    <Button
+        android:id="@+id/retryTorButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_gravity="end"
+        android:layout_marginEnd="8dp"
+        android:contentDescription="Retry Tor connection"
+        android:text="Retry Tor"
+        android:visibility="gone" />
+
 
     <ProgressBar
         android:id="@+id/pageProgress"

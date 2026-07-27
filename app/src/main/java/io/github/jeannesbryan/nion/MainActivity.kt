@@ -1,5 +1,9 @@
 package io.github.jeannesbryan.nion
 
+import android.content.res.Configuration
+
+import android.content.ComponentCallbacks2
+
 import android.util.Base64
 
 import android.graphics.drawable.BitmapDrawable
@@ -27,10 +31,12 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
+import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoRuntimeSettings
 import org.mozilla.geckoview.GeckoSession
@@ -70,6 +76,24 @@ class MainActivity : ComponentActivity() {
 
         private const val MAX_BOOKMARKS = 256
 
+        private const val TOR_CHECK_URL =
+            "https://check.torproject.org/"
+
+        private const val PRIVACY_PREFS =
+            "nion_privacy"
+
+        private const val PRIVACY_COOKIE_POLICY =
+            "cookie_policy"
+
+        private const val COOKIE_POLICY_BALANCED =
+            "balanced"
+
+        private const val COOKIE_POLICY_STRICT =
+            "strict"
+
+        private const val COOKIE_POLICY_NONE =
+            "none"
+
         private var runtime: GeckoRuntime? = null
         private var runtimeSocksPort: Int = -1
     }
@@ -104,9 +128,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var bookmarkButton: Button
     private lateinit var clearSiteDataButton: Button
     private lateinit var siteInfoButton: Button
+    private lateinit var browserMenuButton: Button
+    private lateinit var downloadCenter: DownloadCenter
     private lateinit var tabStrip: LinearLayout
 
     private lateinit var torStatus: TextView
+    private lateinit var retryTorButton: Button
     private lateinit var pageProgress: ProgressBar
 
     private val tabs = mutableListOf<BrowserTab>()
@@ -133,6 +160,11 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var torEverReady = false
 
+    @Volatile
+    private var torRetryInProgress = false
+
+    private var torWatchStartedAt = 0L
+
     private val serviceConnection =
         object : ServiceConnection {
 
@@ -145,6 +177,11 @@ class MainActivity : ComponentActivity() {
 
                 torService = localBinder.service
                 serviceBound = true
+                torRetryInProgress = false
+
+                runOnUiThread {
+                    retryTorButton.isEnabled = true
+                }
 
                 watchTor()
             }
@@ -154,6 +191,10 @@ class MainActivity : ComponentActivity() {
             ) {
                 serviceBound = false
                 torService = null
+
+                if (torRetryInProgress) {
+                    return
+                }
 
                 runOnUiThread {
                     failClosed(
@@ -169,6 +210,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         setContentView(R.layout.activity_main)
+
+        downloadCenter =
+            DownloadCenter(
+                this
+            ) { url ->
+                openLinkInNewTab(
+                    url
+                )
+            }
 
         geckoView =
             findViewById(R.id.geckoview)
@@ -203,11 +253,17 @@ class MainActivity : ComponentActivity() {
         siteInfoButton =
             findViewById(R.id.siteInfoButton)
 
+        browserMenuButton =
+            findViewById(R.id.browserMenuButton)
+
         tabStrip =
             findViewById(R.id.tabStrip)
 
         torStatus =
             findViewById(R.id.torStatus)
+
+        retryTorButton =
+            findViewById(R.id.retryTorButton)
 
         pageProgress =
             findViewById(R.id.pageProgress)
@@ -286,6 +342,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        browserMenuButton.setOnClickListener {
+            if (browserReady) {
+                showBrowserMenu()
+            }
+        }
+
+        addressBar.setSelectAllOnFocus(true)
+
         addressBar.setOnEditorActionListener {
                 _,
                 actionId,
@@ -326,6 +390,12 @@ class MainActivity : ComponentActivity() {
             }
         )
 
+        retryTorButton.setOnClickListener {
+            retryTorConnection()
+        }
+
+        setTorRetryVisible(false)
+
         torStatus.text =
             "Tor: starting..."
 
@@ -346,6 +416,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun watchTor() {
+        torWatchStartedAt =
+            System.currentTimeMillis()
+
+        runOnUiThread {
+            setTorRetryVisible(false)
+        }
+
         torWatchThread =
             Thread {
                 while (
@@ -441,6 +518,17 @@ class MainActivity : ComponentActivity() {
                         }
 
                         if (
+                            !browserReady &&
+                            System.currentTimeMillis() -
+                                torWatchStartedAt >=
+                                60_000L
+                        ) {
+                            runOnUiThread {
+                                setTorRetryVisible(true)
+                            }
+                        }
+
+                        if (
                             progress == 100 &&
                             !browserReady
                         ) {
@@ -514,6 +602,11 @@ class MainActivity : ComponentActivity() {
                     .configFilePath(
                         configFile.absolutePath
                     )
+                    .preferredColorScheme(
+                        GeckoRuntimeSettings
+                            .COLOR_SCHEME_SYSTEM
+                    )
+                    .lowMemoryDetection(true)
                     .build()
 
             runtime =
@@ -534,6 +627,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        applyRuntimePrivacySettings()
+
         torEverReady = true
         browserReady = true
 
@@ -542,12 +637,56 @@ class MainActivity : ComponentActivity() {
         torStatus.text =
             "Tor: connected — SOCKS 127.0.0.1:$socksPort"
 
-        if (!restoreSessionSnapshot()) {
-            createTab(
-                "https://check.torproject.org/",
-                true
-            )
+        setTorRetryVisible(false)
+
+        restoreSessionSnapshot()
+
+        /*
+         * Every successful app startup ends on Tor Project's
+         * verification page. An existing check tab is reused
+         * instead of creating duplicates.
+         */
+        openStartupTorCheck()
+    }
+
+    private fun openStartupTorCheck() {
+        if (!browserReady) {
+            return
         }
+
+        val normalizedCheck =
+            TOR_CHECK_URL.trimEnd('/')
+
+        val existingIndex =
+            tabs.indexOfFirst { tab ->
+                tab.url
+                    .trim()
+                    .trimEnd('/') ==
+                    normalizedCheck
+            }
+
+        if (existingIndex >= 0) {
+            val tab =
+                tabs[existingIndex]
+
+            tab.restoredPendingLoad =
+                false
+
+            switchToTab(
+                existingIndex
+            )
+
+            tab.session.loadUri(
+                TOR_CHECK_URL
+            )
+
+            return
+        }
+
+        createTab(
+            TOR_CHECK_URL,
+            true
+        )
     }
 
     private fun createTab(
@@ -597,13 +736,56 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                override fun onContextMenu(
+                    session: GeckoSession,
+                    screenX: Int,
+                    screenY: Int,
+                    element: GeckoSession.ContentDelegate.ContextElement
+                ) {
+                    val linkUrl =
+                        element.linkUri
+                            ?.trim()
+                            .orEmpty()
+
+                    if (linkUrl.isEmpty()) {
+                        return
+                    }
+
+                    BrowserEssentials.showLinkMenu(
+                        activity = this@MainActivity,
+                        url = linkUrl,
+                        label = element.linkText
+                            ?.trim()
+                            ?.takeIf { it.isNotEmpty() }
+                    ) {
+                        openLinkInNewTab(linkUrl)
+                    }
+                }
+
+                override fun onCrash(
+                    session: GeckoSession
+                ) {
+                    recoverCrashedTab(
+                        session
+                    )
+                }
+
+                override fun onKill(
+                    session: GeckoSession
+                ) {
+                    recoverCrashedTab(
+                        session
+                    )
+                }
+
                 override fun onExternalResponse(
                     session: GeckoSession,
                     response: WebResponse
                 ) {
-                    handleDownloadResponse(
-                        response
-                    )
+                    downloadCenter
+                        .handleExternalResponse(
+                            response
+                        )
                 }
             }
         )
@@ -956,6 +1138,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        addressBar.clearFocus()
+
         val targetTab =
             tabs[index]
 
@@ -1021,7 +1205,7 @@ class MainActivity : ComponentActivity() {
          * visible while this session paints its first frame.
          */
         geckoView.coverUntilFirstPaint(
-            Color.WHITE
+            getColor(R.color.nion_background)
         )
 
         geckoView.setSession(
@@ -1278,170 +1462,6 @@ class MainActivity : ComponentActivity() {
 
             false
         }
-    }
-
-    private fun handleDownloadResponse(
-        response: WebResponse
-    ) {
-        val body =
-            response.body
-
-        if (body == null) {
-            Toast.makeText(
-                this,
-                "Download contains no data",
-                Toast.LENGTH_SHORT
-            ).show()
-
-            return
-        }
-
-        val fileName =
-            TorDownloadHandler
-                .suggestedFileName(
-                    response
-                )
-
-        val size =
-            TorDownloadHandler
-                .contentLength(
-                    response
-                )
-
-        val host =
-            try {
-                Uri.parse(
-                    response.uri
-                ).host
-            } catch (_: Exception) {
-                null
-            }
-
-        val details =
-            buildString {
-                append(fileName)
-
-                if (size != null) {
-                    append(
-                        "\n"
-                    )
-
-                    append(
-                        formatDownloadSize(
-                            size
-                        )
-                    )
-                }
-
-                if (
-                    !host.isNullOrBlank()
-                ) {
-                    append(
-                        "\nFrom: "
-                    )
-
-                    append(host)
-                }
-            }
-
-        AlertDialog.Builder(this)
-            .setTitle(
-                "Download file?"
-            )
-            .setMessage(details)
-            .setPositiveButton(
-                "Download"
-            ) { _, _ ->
-
-                startTorDownload(
-                    response,
-                    fileName
-                )
-            }
-            .setNegativeButton(
-                "Cancel"
-            ) { _, _ ->
-
-                TorDownloadHandler
-                    .discard(response)
-            }
-            .setOnCancelListener {
-                TorDownloadHandler
-                    .discard(response)
-            }
-            .show()
-    }
-
-    private fun startTorDownload(
-        response: WebResponse,
-        fileName: String
-    ) {
-        Toast.makeText(
-            this,
-            "Downloading $fileName",
-            Toast.LENGTH_SHORT
-        ).show()
-
-        TorDownloadHandler.save(
-            context = applicationContext,
-            response = response,
-            fileName = fileName,
-
-            onSuccess = { result ->
-
-                runOnUiThread {
-                    Toast.makeText(
-                        this,
-                        "Downloaded: ${result.fileName}\n${result.location}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            },
-
-            onFailure = { reason ->
-
-                runOnUiThread {
-                    Toast.makeText(
-                        this,
-                        "Download failed: $reason",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
-        )
-    }
-
-    private fun formatDownloadSize(
-        bytes: Long
-    ): String {
-        if (bytes < 1024L) {
-            return "$bytes B"
-        }
-
-        val kib =
-            bytes / 1024.0
-
-        if (kib < 1024.0) {
-            return String.format(
-                "%.1f KiB",
-                kib
-            )
-        }
-
-        val mib =
-            kib / 1024.0
-
-        if (mib < 1024.0) {
-            return String.format(
-                "%.1f MiB",
-                mib
-            )
-        }
-
-        return String.format(
-            "%.2f GiB",
-            mib / 1024.0
-        )
     }
 
     private fun updateSiteInfoButton() {
@@ -2161,21 +2181,612 @@ class MainActivity : ComponentActivity() {
         renderTabStrip()
     }
 
+    private fun privacyPreferences() =
+        getSharedPreferences(
+            PRIVACY_PREFS,
+            MODE_PRIVATE
+        )
+
+    private fun currentCookiePolicy(): String {
+        val value =
+            privacyPreferences()
+                .getString(
+                    PRIVACY_COOKIE_POLICY,
+                    COOKIE_POLICY_BALANCED
+                )
+
+        return when (value) {
+            COOKIE_POLICY_STRICT,
+            COOKIE_POLICY_NONE -> value
+            else -> COOKIE_POLICY_BALANCED
+        }
+    }
+
+    private fun cookiePolicyLabel(
+        policy: String = currentCookiePolicy()
+    ): String {
+        return when (policy) {
+            COOKIE_POLICY_STRICT ->
+                "Strict — first-party only"
+
+            COOKIE_POLICY_NONE ->
+                "Block all cookies/site data"
+
+            else ->
+                "Balanced — partition third-party"
+        }
+    }
+
+    private fun cookieBehaviorFor(
+        policy: String
+    ): Int {
+        return when (policy) {
+            COOKIE_POLICY_STRICT ->
+                ContentBlocking
+                    .CookieBehavior
+                    .ACCEPT_FIRST_PARTY
+
+            COOKIE_POLICY_NONE ->
+                ContentBlocking
+                    .CookieBehavior
+                    .ACCEPT_NONE
+
+            else ->
+                ContentBlocking
+                    .CookieBehavior
+                    .ACCEPT_FIRST_PARTY_AND_ISOLATE_OTHERS
+        }
+    }
+
+    private fun applyRuntimePrivacySettings() {
+        val currentRuntime =
+            runtime ?: return
+
+        val policy =
+            currentCookiePolicy()
+
+        currentRuntime
+            .getSettings()
+            .setGlobalPrivacyControl(true)
+
+        currentRuntime
+            .getSettings()
+            .getContentBlocking()
+            .setCookieBehavior(
+                cookieBehaviorFor(policy)
+            )
+            .setCookiePurging(
+                policy ==
+                    COOKIE_POLICY_BALANCED
+            )
+    }
+
+    private fun setCookiePolicy(
+        policy: String
+    ) {
+        privacyPreferences()
+            .edit()
+            .putString(
+                PRIVACY_COOKIE_POLICY,
+                policy
+            )
+            .apply()
+
+        applyRuntimePrivacySettings()
+
+        Toast.makeText(
+            this,
+            "Cookie policy: ${cookiePolicyLabel(policy)}",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun showCookiePolicyDialog() {
+        val policies =
+            arrayOf(
+                COOKIE_POLICY_BALANCED,
+                COOKIE_POLICY_STRICT,
+                COOKIE_POLICY_NONE
+            )
+
+        val labels =
+            arrayOf(
+                "Balanced (recommended)\nPartition third-party cookies/site data",
+                "Strict\nAllow first-party cookies/site data only",
+                "Block all\nNo cookies or site data; logins may break"
+            )
+
+        val selected =
+            policies.indexOf(
+                currentCookiePolicy()
+            ).coerceAtLeast(0)
+
+        AlertDialog.Builder(this)
+            .setTitle(
+                "Cookie & Site Data Policy"
+            )
+            .setSingleChoiceItems(
+                labels,
+                selected
+            ) { dialog, which ->
+                setCookiePolicy(
+                    policies[which]
+                )
+
+                dialog.dismiss()
+            }
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .show()
+    }
+
+    private fun showPrivacyStatusDialog() {
+        val socks =
+            if (
+                browserReady &&
+                runtimeSocksPort > 0
+            ) {
+                "Connected — SOCKS 127.0.0.1:$runtimeSocksPort"
+            } else {
+                "Unavailable"
+            }
+
+        val message =
+            buildString {
+                append("Tor routing\n")
+                append(socks)
+
+                append("\n\nRemote DNS\n")
+                append("Through Tor SOCKS")
+
+                append("\n\nCookie policy\n")
+                append(
+                    cookiePolicyLabel()
+                )
+
+                append("\n\nGlobal Privacy Control\n")
+                append("Enabled")
+
+                append("\n\nHTTPS-First\n")
+                append("Enabled for clearnet")
+
+                append("\n\nWebRTC / media capture\n")
+                append("Disabled / denied")
+
+                append("\n\nGeolocation / notifications / push\n")
+                append("Disabled / denied")
+
+                append("\n\nWebGL\n")
+                append("Disabled")
+
+                append("\n\nPrefetch / speculative networking\n")
+                append("Disabled")
+
+                append("\n\nWebsite permissions\n")
+                append("Denied by default")
+
+                append("\n\nFavicons\n")
+                append("Fetched inside Gecko")
+
+                append("\n\nStartup Tor verification\n")
+                append("Enabled")
+            }
+
+        AlertDialog.Builder(this)
+            .setTitle(
+                "Privacy Status"
+            )
+            .setMessage(message)
+            .setPositiveButton(
+                "Close",
+                null
+            )
+            .show()
+    }
+
+    private fun showPrivacyControlsDialog() {
+        val items =
+            arrayOf(
+                "Cookie policy — ${cookiePolicyLabel()}",
+                "Clear All Browsing Data",
+                "Privacy Status"
+            )
+
+        AlertDialog.Builder(this)
+            .setTitle(
+                "Privacy & Data"
+            )
+            .setItems(items) {
+                    _, which ->
+
+                when (which) {
+                    0 ->
+                        showCookiePolicyDialog()
+
+                    1 ->
+                        confirmClearAllBrowsingData()
+
+                    2 ->
+                        showPrivacyStatusDialog()
+                }
+            }
+            .setNegativeButton(
+                "Close",
+                null
+            )
+            .show()
+    }
+
+    private fun confirmClearAllBrowsingData() {
+        AlertDialog.Builder(this)
+            .setTitle(
+                "Clear all browsing data?"
+            )
+            .setMessage(
+                "This closes all tabs and clears cookies, site storage, caches, permissions, auth sessions, and the saved tab session.\n\nBookmarks and the selected privacy policy are kept."
+            )
+            .setPositiveButton(
+                "Clear All"
+            ) { _, _ ->
+                clearAllBrowsingData()
+            }
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .show()
+    }
+
+    private fun closeAllTabsForDataClear() {
+        geckoView
+            .releaseSession()
+            ?.apply {
+                setFocused(false)
+                setActive(false)
+            }
+
+        tabs.forEach { tab ->
+            faviconBridge
+                ?.unregisterSession(
+                    tab.session
+                )
+
+            try {
+                tab.session.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        tabs.clear()
+        insecureHttpOnce.clear()
+
+        currentTabIndex = -1
+        pendingPopupSession = null
+
+        pageProgress.visibility =
+            View.GONE
+
+        renderTabStrip()
+
+        addressBar.setText("")
+    }
+
+    private fun clearAllBrowsingData() {
+        val currentRuntime =
+            runtime ?: return
+
+        if (
+            ::downloadCenter
+                .isInitialized
+        ) {
+            downloadCenter
+                .clearForBrowsingData()
+        }
+
+        setBrowserControlsEnabled(false)
+
+        closeAllTabsForDataClear()
+
+        getSharedPreferences(
+            SESSION_PREFS,
+            MODE_PRIVATE
+        )
+            .edit()
+            .clear()
+            .apply()
+
+        Toast.makeText(
+            this,
+            "Clearing browsing data…",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        currentRuntime
+            .getStorageController()
+            .clearData(
+                StorageController
+                    .ClearFlags
+                    .ALL
+            )
+            .accept(
+                {
+                    runOnUiThread {
+                        if (!browserReady) {
+                            return@runOnUiThread
+                        }
+
+                        setBrowserControlsEnabled(
+                            true
+                        )
+
+                        Toast.makeText(
+                            this,
+                            "Browsing data cleared",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        createTab(
+                            TOR_CHECK_URL,
+                            true
+                        )
+                    }
+                },
+                { error ->
+                    runOnUiThread {
+                        if (browserReady) {
+                            setBrowserControlsEnabled(
+                                true
+                            )
+
+                            createTab(
+                                TOR_CHECK_URL,
+                                true
+                            )
+                        }
+
+                        Toast.makeText(
+                            this,
+                            "Could not clear all browsing data: " +
+                                (
+                                    error?.message
+                                        ?: "unknown error"
+                                ),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            )
+    }
+
+    private fun isHttpOrHttpsUrl(
+        value: String
+    ): Boolean {
+        return try {
+            val scheme =
+                Uri.parse(value)
+                    .scheme
+                    ?.lowercase()
+
+            scheme == "http" ||
+                scheme == "https"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun showBrowserMenu() {
+        if (!browserReady) {
+            return
+        }
+
+        val tab =
+            currentTab()
+                ?: return
+
+        val currentUrl =
+            tab.url.trim()
+
+        val webPage =
+            isHttpOrHttpsUrl(currentUrl)
+
+        val clipboardText =
+            BrowserEssentials
+                .clipboardText(this)
+
+        PopupMenu(
+            this,
+            browserMenuButton
+        ).apply {
+            menu.add(
+                0,
+                1,
+                0,
+                "Find in Page"
+            ).isEnabled =
+                tab.session.isOpen &&
+                currentUrl != "about:blank"
+
+            menu.add(
+                0,
+                2,
+                1,
+                "Paste & Go"
+            ).isEnabled =
+                !clipboardText.isNullOrBlank()
+
+            menu.add(
+                0,
+                3,
+                2,
+                "Copy URL"
+            ).isEnabled = webPage
+
+            menu.add(
+                0,
+                4,
+                3,
+                "Share URL"
+            ).isEnabled = webPage
+
+            menu.add(
+                0,
+                5,
+                4,
+                "Bookmarks"
+            )
+
+            menu.add(
+                0,
+                6,
+                5,
+                "Site Information"
+            ).isEnabled = webPage
+
+            menu.add(
+                0,
+                7,
+                6,
+                "Clear Data for This Site"
+            ).isEnabled = webPage
+
+            menu.add(
+                0,
+                8,
+                7,
+                "Privacy & Data"
+            )
+
+            menu.add(
+                0,
+                9,
+                8,
+                "Downloads"
+            )
+
+            setOnMenuItemClickListener {
+                    item ->
+
+                when (item.itemId) {
+                    1 -> {
+                        BrowserEssentials
+                            .showFindInPage(
+                                this@MainActivity,
+                                tab.session
+                            )
+                        true
+                    }
+
+                    2 -> {
+                        val pasted =
+                            BrowserEssentials
+                                .clipboardText(
+                                    this@MainActivity
+                                )
+
+                        if (!pasted.isNullOrBlank()) {
+                            addressBar.setText(pasted)
+                            addressBar.setSelection(
+                                pasted.length
+                            )
+                            loadInput(pasted)
+                        }
+                        true
+                    }
+
+                    3 -> {
+                        BrowserEssentials.copyText(
+                            this@MainActivity,
+                            "URL",
+                            currentUrl
+                        )
+                        true
+                    }
+
+                    4 -> {
+                        BrowserEssentials.shareUrl(
+                            this@MainActivity,
+                            currentUrl
+                        )
+                        true
+                    }
+
+                    5 -> {
+                        showBookmarksDialog()
+                        true
+                    }
+
+                    6 -> {
+                        showCurrentSiteInfo()
+                        true
+                    }
+
+                    7 -> {
+                        confirmClearCurrentSiteData()
+                        true
+                    }
+
+                    8 -> {
+                        showPrivacyControlsDialog()
+                        true
+                    }
+
+                    9 -> {
+                        downloadCenter.show()
+                        true
+                    }
+
+                    else -> false
+                }
+            }
+
+            show()
+        }
+    }
+
+    private fun openLinkInNewTab(
+        url: String
+    ) {
+        if (
+            !browserReady ||
+            !isHttpOrHttpsUrl(url)
+        ) {
+            return
+        }
+
+        if (tabs.size >= MAX_USER_TABS) {
+            Toast.makeText(
+                this,
+                "Maximum $MAX_USER_TABS tabs",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        createTab(
+            url,
+            true
+        )
+    }
+
     private fun showCurrentAddress() {
         val tab =
             currentTab()
                 ?: return
 
-        addressBar.setText(
-            if (
-                tab.url ==
-                "about:blank"
-            ) {
-                ""
-            } else {
-                tab.url
-            }
-        )
+        if (!addressBar.hasFocus()) {
+            addressBar.setText(
+                if (
+                    tab.url ==
+                    "about:blank"
+                ) {
+                    ""
+                } else {
+                    tab.url
+                }
+            )
+        }
 
         updateBookmarkButton()
         updateClearSiteDataButton()
@@ -2603,7 +3214,9 @@ class MainActivity : ComponentActivity() {
         addressBar.clearFocus()
     }
 
-    private fun loadAddress() {
+    private fun loadInput(
+        rawInput: String
+    ) {
         if (!browserReady) {
             return
         }
@@ -2613,10 +3226,7 @@ class MainActivity : ComponentActivity() {
                 ?: return
 
         val input =
-            addressBar
-                .text
-                .toString()
-                .trim()
+            rawInput.trim()
 
         if (input.isEmpty()) {
             return
@@ -2636,9 +3246,224 @@ class MainActivity : ComponentActivity() {
         renderTabStrip()
     }
 
+    private fun loadAddress() {
+        loadInput(
+            addressBar
+                .text
+                .toString()
+        )
+    }
+
+    private fun setTorRetryVisible(
+        visible: Boolean
+    ) {
+        retryTorButton.visibility =
+            if (visible) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+    }
+
+    private fun retryTorConnection() {
+        if (
+            shuttingDown ||
+            torRetryInProgress
+        ) {
+            return
+        }
+
+        torRetryInProgress = true
+        browserReady = false
+        torEverReady = false
+
+        setBrowserControlsEnabled(false)
+
+        retryTorButton.isEnabled =
+            false
+
+        setTorRetryVisible(false)
+
+        torStatus.text =
+            "Tor: restarting..."
+
+        torWatchThread
+            ?.interrupt()
+
+        torWatchThread =
+            null
+
+        if (serviceBound) {
+            try {
+                unbindService(
+                    serviceConnection
+                )
+            } catch (_: Exception) {
+            }
+        }
+
+        serviceBound = false
+        torService = null
+
+        try {
+            stopService(
+                Intent(
+                    this,
+                    TorService::class.java
+                )
+            )
+        } catch (_: Exception) {
+        }
+
+        geckoView.postDelayed(
+            {
+                if (shuttingDown) {
+                    return@postDelayed
+                }
+
+                val bound =
+                    try {
+                        bindService(
+                            Intent(
+                                this,
+                                TorService::class.java
+                            ),
+                            serviceConnection,
+                            Context.BIND_AUTO_CREATE
+                        )
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (!bound) {
+                    torRetryInProgress =
+                        false
+
+                    retryTorButton.isEnabled =
+                        true
+
+                    setTorRetryVisible(true)
+
+                    torStatus.text =
+                        "BLOCKED — could not restart Tor"
+                }
+            },
+            1_200L
+        )
+    }
+
+    private fun recoverCrashedTab(
+        session: GeckoSession
+    ) {
+        val index =
+            findTabIndex(session)
+
+        if (index < 0) {
+            return
+        }
+
+        val tab =
+            tabs[index]
+
+        faviconBridge
+            ?.unregisterSession(
+                session
+            )
+
+        tab.loadingProgress = 0
+        tab.favicon = null
+
+        tab.restoredPendingLoad =
+            tab.url.isNotBlank() &&
+            tab.url != "about:blank"
+
+        if (
+            !browserReady ||
+            index != currentTabIndex
+        ) {
+            renderTabStrip()
+            saveSessionSnapshot()
+            return
+        }
+
+        geckoView
+            .releaseSession()
+            ?.apply {
+                setFocused(false)
+                setActive(false)
+                setPriorityHint(
+                    GeckoSession.PRIORITY_DEFAULT
+                )
+            }
+
+        switchToTab(index)
+
+        Toast.makeText(
+            this,
+            "Tab recovered after Gecko process stopped",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun releaseBackgroundTabsForMemory() {
+        if (!browserReady) {
+            return
+        }
+
+        var released = 0
+
+        tabs.forEachIndexed {
+                index,
+                tab ->
+
+            if (
+                index == currentTabIndex ||
+                tab.session ===
+                    pendingPopupSession ||
+                !tab.session.isOpen
+            ) {
+                return@forEachIndexed
+            }
+
+            faviconBridge
+                ?.unregisterSession(
+                    tab.session
+                )
+
+            tab.session.setFocused(false)
+            tab.session.setActive(false)
+
+            tab.restoredPendingLoad =
+                tab.url.isNotBlank() &&
+                tab.url != "about:blank"
+
+            tab.loadingProgress = 0
+            tab.favicon = null
+
+            try {
+                tab.session.close()
+                released++
+            } catch (_: Exception) {
+            }
+        }
+
+        if (released > 0) {
+            renderTabStrip()
+            saveSessionSnapshot()
+        }
+    }
+
     private fun failClosed(
         reason: String
     ) {
+        if (
+            ::downloadCenter
+                .isInitialized
+        ) {
+            downloadCenter
+                .cancelActiveForTorLoss()
+        }
+
         geckoView
             .releaseSession()
             ?.apply {
@@ -2675,6 +3500,11 @@ class MainActivity : ComponentActivity() {
 
         torStatus.text =
             "BLOCKED — $reason"
+
+        retryTorButton.isEnabled =
+            true
+
+        setTorRetryVisible(true)
     }
 
     private fun setBrowserControlsEnabled(
@@ -2687,6 +3517,9 @@ class MainActivity : ComponentActivity() {
             enabled
 
         newTabButton.isEnabled =
+            enabled
+
+        browserMenuButton.isEnabled =
             enabled
 
         if (!enabled) {
@@ -2759,6 +3592,37 @@ class MainActivity : ComponentActivity() {
         return configFile
     }
 
+    override fun onTrimMemory(
+        level: Int
+    ) {
+        super.onTrimMemory(level)
+
+        if (
+            level >=
+            ComponentCallbacks2
+                .TRIM_MEMORY_BACKGROUND
+        ) {
+            releaseBackgroundTabsForMemory()
+        }
+    }
+
+    override fun onLowMemory() {
+        releaseBackgroundTabsForMemory()
+        super.onLowMemory()
+    }
+
+    override fun onConfigurationChanged(
+        newConfig: Configuration
+    ) {
+        super.onConfigurationChanged(
+            newConfig
+        )
+
+        renderTabStrip()
+        updateNavigationButtons()
+        updateLoadingUi()
+    }
+
     override fun onPause() {
         currentTab()
             ?.session
@@ -2770,16 +3634,18 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
 
-        if (browserReady) {
-            currentTab()
-                ?.session
-                ?.apply {
-                    setActive(true)
-                    setFocused(true)
-                    setPriorityHint(
-                        GeckoSession.PRIORITY_HIGH
-                    )
-                }
+        /*
+         * Rebind the existing GeckoSession after Activity
+         * visibility returns. This preserves page/history state
+         * and recreates GeckoView's rendering attachment.
+         */
+        if (
+            browserReady &&
+            currentTabIndex in tabs.indices
+        ) {
+            switchToTab(
+                currentTabIndex
+            )
         }
     }
 
@@ -2787,8 +3653,13 @@ class MainActivity : ComponentActivity() {
         if (browserReady) {
             saveSessionSnapshot()
 
-            currentTab()
-                ?.session
+            /*
+             * Activity is no longer visible. Detach only the
+             * GeckoView rendering surface; keep GeckoSession
+             * open so onResume() can attach the same session.
+             */
+            geckoView
+                .releaseSession()
                 ?.apply {
                     setFocused(false)
                     setActive(false)
@@ -2804,6 +3675,13 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (browserReady) {
             saveSessionSnapshot()
+        }
+
+        if (
+            ::downloadCenter
+                .isInitialized
+        ) {
+            downloadCenter.shutdown()
         }
 
         shuttingDown = true

@@ -74,3 +74,7 @@ lint-results*.html
 lint-results*.xml
 
 # Do not ignore source Android resources or bundled assets.
+
+# NiOn production signing
+.release-env
+release.properties

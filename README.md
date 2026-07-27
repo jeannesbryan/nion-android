@@ -6,7 +6,7 @@ NiOn Android is a separate project from the Linux version of NiOn. It uses Gecko
 
 ## Current version
 
-**0.5.0**
+**1.0.0**
 
 ## Highlights
 
@@ -29,6 +29,24 @@ NiOn Android is a separate project from the Linux version of NiOn. It uses Gecko
 - NiOn launcher icon
 - Compact mobile tab UI
 - Up to 8 tabs
+- Tor bootstrap Retry control
+- Gecko tab crash recovery
+- Low-memory background-tab unloading
+- Screen rotation without Activity restart
+- System light/dark UI integration
+- Adaptive and themed launcher icon support
+- Accessibility descriptions for browser controls
+- Find in Page
+- Paste & Go
+- Copy / Share current URL
+- Long-press link actions (Open in New Tab / Copy Link)
+- Compact browser overflow menu
+- Automatic Tor Project verification page after successful startup
+- Privacy & Data control center
+- Global cookie/site-data policy (Balanced, Strict, Block all)
+- Clear All Browsing Data
+- Global Privacy Control enabled
+- Privacy status summary
 
 ## Privacy baseline
 
@@ -106,7 +124,7 @@ dist/nion_<version>.apk
 For example:
 
 ```text
-dist/nion_0.5.0.apk
+dist/nion_1.0.0.apk
 ```
 
 `dist/` is intentionally ignored by Git. APKs intended for distribution should be attached to a GitHub Release instead of committed to the repository.
@@ -117,7 +135,7 @@ Enable USB debugging, connect the device, then:
 
 ```bash
 adb devices
-adb install -r dist/nion_0.5.0.apk
+adb install -r dist/nion_1.0.0.apk
 ```
 
 Launch manually:
@@ -151,6 +169,20 @@ NiOn starts the bundled Tor service and waits for bootstrap completion before en
 
 GeckoView is configured to use the Tor SOCKS proxy on localhost with remote DNS enabled. If the Tor runtime fails or its control state is lost, NiOn closes active browsing sessions and enters a blocked state rather than silently falling back to direct networking.
 
+## Startup Tor verification
+
+After bundled Tor reaches 100% bootstrap and GeckoView is configured for the Tor SOCKS proxy, NiOn automatically opens `https://check.torproject.org/`.
+
+If a Tor Check tab already exists in the restored session, NiOn reuses and reloads it instead of creating another duplicate tab. This is an additional visible verification step; NiOn's actual fail-closed enforcement still comes from its own Tor runtime and Gecko proxy state.
+
+## Privacy & Data controls
+
+NiOn 0.7.0 adds a Privacy & Data control center to the browser menu. The default Balanced cookie policy uses Gecko cookie partitioning for third-party storage. Strict mode accepts only first-party cookies/site data, while Block all disables cookie/site-data storage and may break logins.
+
+Clear All Browsing Data closes all open Gecko sessions before clearing Gecko storage, then removes the saved tab session. Bookmarks and the selected privacy policy are kept.
+
+Global Privacy Control is enabled at the Gecko runtime level. The Privacy Status dialog summarizes Tor routing, remote DNS, HTTPS-First, permission denial, and the existing WebRTC/WebGL/prefetch hardening.
+
 ## HTTPS-First
 
 For clearnet sites, top-level `http://` navigation is upgraded to `https://`.
@@ -159,13 +191,30 @@ For clearnet sites, top-level `http://` navigation is upgraded to `https://`.
 
 When an HTTPS clearnet connection fails, NiOn may offer an explicit one-time HTTP fallback. It does not automatically downgrade in the background.
 
+## Browser essentials
+
+NiOn 0.6.0 adds a compact browser menu with Find in Page, Paste & Go, Copy URL, Share URL, bookmarks, Site Information, and Clear Data for This Site.
+
+Long-pressing a web link offers Open in New Tab and Copy Link. New-tab navigation remains inside GeckoView and therefore continues through NiOn's existing Tor and HTTPS-First navigation policy.
+
 ## Downloads
 
-NiOn does not delegate normal downloads to Android `DownloadManager`.
+NiOn keeps download network requests inside GeckoView. `ContentDelegate.onExternalResponse()` provides the already-received `WebResponse` body to the app, so NiOn does not issue a second Android-network request for the file.
 
-Download response bodies are consumed from GeckoView so the original request remains part of Gecko's Tor-routed networking path.
+NiOn 0.8.0 adds a local Download Center with:
 
-On modern Android versions, completed files are written to the system Downloads collection. Older supported Android versions use the app-specific downloads directory.
+- live byte/percentage progress for active transfers;
+- cancellation of active transfers;
+- persistent local history (up to 100 records);
+- open-file actions for completed downloads;
+- retry of failed/cancelled source URLs in a new Gecko tab;
+- clear-history without deleting downloaded files.
+
+On Android 10 and newer, files are written to the app-owned `MediaStore.Downloads` entry. On Android 8/9, NiOn uses its app-specific downloads directory and exposes completed files to external viewers through Android `FileProvider`.
+
+Download history stores filenames, source URLs, status, progress and file locations locally. `Clear All Browsing Data` cancels any active download, removes its history metadata, and prevents final transfer callbacks from recreating that history. Already-downloaded files are left untouched.
+
+The Download Center's `Clear History` action removes completed, failed, and cancelled records while active transfers continue.
 
 ## Favicons
 
@@ -204,6 +253,46 @@ Sensitive web permissions are denied by the browser's permission delegate.
 NiOn Android is developed incrementally with physical-device regression testing.
 
 Changes that are closely related should be grouped into a single patch/build/test pass when doing so does not weaken reliability, privacy, or Tor fail-closed behavior.
+
+## Screen lock and lifecycle recovery
+
+When the Android Activity becomes fully hidden, NiOn detaches the active GeckoView display surface while keeping the underlying GeckoSession alive. When the Activity resumes, the existing tab/session is attached again through the normal tab-switch path. This avoids a forced page reload and prevents a stale black rendering surface after screen lock/unlock.
+
+## Reliability and Android integration
+
+NiOn 0.9.0 handles both Gecko content-process crash and kill callbacks, recovering the affected tab from NiOn's URL-only tab state. It also provides an explicit Tor Retry control when bootstrap stalls or Tor becomes unavailable, plus conservative low-memory handling that unloads only background Gecko sessions while preserving their URLs for lazy reload.
+
+Screen rotation is handled without recreating the Activity, while system light/dark mode continues to use Android day/night resources. Gecko web content follows the system preferred color scheme.
+
+The Retry action never enables a direct-network fallback. Browsing remains disabled while bundled Tor restarts, and Gecko continues to use the configured localhost SOCKS proxy with remote DNS.
+
+Launcher resources now include adaptive-icon variants and a monochrome layer for compatible themed-icon launchers.
+
+## Production release signing
+
+NiOn 1.0.0 uses a dedicated Android release signing key. The private keystore is intentionally stored outside the repository at `~/.config/nion-android/nion-release.jks`, and signing passwords are supplied only through the local release-build process.
+
+Create the permanent key once:
+
+```bash
+./scripts/setup-release-key.sh
+```
+
+Back up that keystore securely. Published Android updates must continue to use the same signing identity.
+
+Build a signed release candidate or stable APK:
+
+```bash
+./scripts/build-release-apk.sh
+```
+
+Verify its Android signature, ZIP alignment and SHA-256 checksum:
+
+```bash
+./scripts/verify-release-apk.sh
+```
+
+Release artifacts are written to `dist/` and remain excluded from Git. The stable APK and `SHA256SUMS` are intended to be attached to the GitHub Release rather than committed to the source repository.
 
 ## Status
 

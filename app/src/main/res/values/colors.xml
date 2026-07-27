@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nion_background">#FFFFFF</color>
+    <color name="nion_text_primary">#111111</color>
+    <color name="nion_text_secondary">#5F6368</color>
+    <color name="nion_icon_background">#FFFFFF</color>
+</resources>
